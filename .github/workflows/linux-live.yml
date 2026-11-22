@@ -97,6 +97,7 @@ jobs:
           LIVE=/tmp/taoops-live
           WAFROOT=/etc/openresty/taoops-waf
           EVENTS_LOG=/var/log/taoops-waf/events.log
+          mkdir -p "$LIVE/logs"
           sudo mkdir -p "$WAFROOT/lua" /var/log/taoops-waf
           sudo cp "$LIVE"/waf/access.lua "$WAFROOT/lua/"
           sudo cp "$LIVE"/waf/rules-whitelist.json "$WAFROOT/lua/rules.json"
