@@ -49,7 +49,7 @@ jobs:
           dist=noble
           wget -qO /tmp/openresty.gpg https://openresty.org/package/pubkey.gpg
           sudo gpg --dearmor < /tmp/openresty.gpg | sudo tee /usr/share/keyrings/openresty.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/openresty.gpg] https://openresty.org/package/ubuntu/dists/$dist/openresty main" | sudo tee /etc/apt/sources.list.d/openresty.list
+          echo "deb [signed-by=/usr/share/keyrings/openresty.gpg] https://openresty.org/package/ubuntu $dist main" | sudo tee /etc/apt/sources.list.d/openresty.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq openresty
           /usr/local/openresty/bin/openresty -V 2>&1 | head -2 || true
