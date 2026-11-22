@@ -1,0 +1,235 @@
+# TaoOps 云端 Linux 实弹验证（编排仓）
+# 背景：私有仓 Actions 执行不可用（免费额度疑似耗尽，TaoBus 11-17 同症状，对照实验 taoops-ci-probe 实锤：
+# 同探针 public 12s success / private 5s failure 零日志）。本仓只放编排与断言，产品源码由 CI
+# 用 PAT 从私有仓 T13424343468/TaoOps（ci/cloud-linux 分支）拉到 runner 内存执行，不落本仓。
+name: linux-live
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  live-fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: 检出编排脚本并拉取私有源码
+        env:
+          TAOOPS_PAT: ${{ secrets.TAOOPS_PAT }}
+        run: |
+          git clone --depth 1 -b ci/cloud-linux \
+            "https://x-access-token:${TAOOPS_PAT}@github.com/T13424343468/TaoOps.git" /tmp/taoops-src
+          cd /tmp/taoops-src && git log --oneline -1
+
+      - name: 安装 .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 安装 Go（与 agent/go.mod 对齐）
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+
+      - name: 回归——.NET 全量 build+test
+        working-directory: /tmp/taoops-src
+        run: |
+          dotnet build TaoOps.slnx -c Release
+          dotnet test --no-restore -c Release
+
+      - name: 回归——Go 全量 build+vet+test
+        working-directory: /tmp/taoops-src/agent
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: 安装 OpenResty（官方 apt 源）
+        run: |
+          dist=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          wget -qO /tmp/openresty.gpg https://openresty.org/package/pubkey.gpg
+          sudo gpg --dearmor < /tmp/openresty.gpg | sudo tee /usr/share/keyrings/openresty.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/openresty.gpg] https://openresty.org/package/ubuntu/dists/$dist/openresty main" | sudo tee /etc/apt/sources.list.d/openresty.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openresty
+          /usr/local/openresty/bin/openresty -V 2>&1 | head -2 || true
+
+      - name: 尝试 luafilesystem（可选；失败记录退化口径）
+        run: |
+          if sudo /usr/local/openresty/bin/opm get openresty/luafilesystem 2>&1; then
+            echo "LFS_INSTALLED=yes" | tee /tmp/lfs-status.txt
+          else
+            echo "LFS_INSTALLED=no (hot reload degrades; access.lua pcall-guarded)" | tee /tmp/lfs-status.txt
+          fi
+
+      - name: 生成 WAF 产物（wafgen）与三版规则
+        working-directory: /tmp/taoops-src
+        run: |
+          set -e
+          dotnet build tools/wafgen -c Release
+          mkdir -p /tmp/taoops-live/waf
+          cat > /tmp/rules-whitelist.json <<'JSON'
+          {"rules":[
+            {"id":"w1","name":"loopback allow","category":"IpWhitelist","action":"Allow","pattern":"127.0.0.1","windowSeconds":0,"maxRequests":0,"priority":60,"enabled":true},
+            {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          JSON
+          cat > /tmp/rules-noip.json <<'JSON'
+          {"rules":[
+            {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          JSON
+          cat > /tmp/rules-cc.json <<'JSON'
+          {"rules":[
+            {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true},
+            {"id":"c1","name":"cc 5/60s","category":"CcRate","action":"Deny","pattern":"","windowSeconds":60,"maxRequests":5,"priority":20,"enabled":true}
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          JSON
+          dotnet tools/wafgen/bin/Release/net10.0/wafgen.dll /tmp/rules-whitelist.json /tmp/taoops-live/waf
+          cp /tmp/rules-whitelist.json /tmp/taoops-live/waf/rules-whitelist.json
+          cp /tmp/rules-noip.json      /tmp/taoops-live/waf/rules-noip.json
+          cp /tmp/rules-cc.json        /tmp/taoops-live/waf/rules-cc.json
+          ls -la /tmp/taoops-live/waf/
+
+      - name: 起 OpenResty 并跑 WAF 实弹断言（L1-L5）
+        run: |
+          set -u
+          LIVE=/tmp/taoops-live
+          WAFROOT=/etc/openresty/taoops-waf
+          EVENTS_LOG=/var/log/taoops-waf/events.log
+          sudo mkdir -p "$WAFROOT/lua" /var/log/taoops-waf
+          sudo cp "$LIVE"/waf/access.lua "$WAFROOT/lua/"
+          sudo cp "$LIVE"/waf/rules-whitelist.json "$WAFROOT/lua/rules.json"
+          sudo tee "$LIVE/nginx.conf" >/dev/null <<EOF
+          worker_processes 1;
+          error_log $EVENTS_LOG info;
+          pid $LIVE/nginx.pid;
+          events { worker_connections 256; }
+          http {
+              include $LIVE/waf/waf.conf;
+              lua_shared_dict taoops_waf_cc 10m;
+              server {
+                  listen 8080;
+                  include $LIVE/waf/site.conf;
+                  location / { return 200 "ok\n"; }
+              }
+          }
+          EOF
+          sudo /usr/local/openresty/bin/openresty -t -c "$LIVE/nginx.conf" -p "$LIVE/"
+          sudo /usr/local/openresty/bin/openresty -c "$LIVE/nginx.conf" -p "$LIVE/"
+          sleep 1
+          echo "== L1 baseline =="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)
+          echo "L1b baseline: $CODE"
+          echo "== L2 whitelist =="
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
+          echo "L2a whitelist SQLi: $CODE (want 200)"
+          echo "== L3 hot reload =="
+          START=$(date +%s)
+          sudo cp /tmp/taoops-live/waf/rules-noip.json "$WAFROOT/lua/rules.json"
+          DETECTED=0
+          for i in $(seq 1 20); do
+            sleep 0.5
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
+            if [ "$CODE" = "403" ]; then DETECTED=1; break; fi
+          done
+          ELAPSED=$(( $(date +%s) - START ))
+          echo "L3a hot-reload deny: detected=$DETECTED elapsed=${ELAPSED}s"
+          echo "== L4 CC =="
+          sudo cp /tmp/taoops-live/waf/rules-cc.json "$WAFROOT/lua/rules.json"
+          sleep 6
+          CODES=""
+          for i in $(seq 1 8); do
+            C=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080/?ccburst=$i")
+            CODES="$CODES $C"
+          done
+          echo "L4 CC burst codes:$CODES"
+          echo "== L5 events log =="
+          sudo grep -c "TAOOPS_WAF" "$EVENTS_LOG" || true
+
+      - name: 起 sshd + rsyslog，SSH 防爆破实弹准备
+        run: |
+          sudo apt-get install -y -qq openssh-server sshpass rsyslog
+          sudo mkdir -p /var/run/sshd
+          sudo systemctl enable --now ssh 2>/dev/null || sudo /usr/sbin/sshd
+          sudo systemctl enable --now rsyslog 2>/dev/null || true
+          sleep 2
+          sudo systemctl is-active ssh 2>/dev/null || sudo /usr/sbin/sshd
+          sudo chmod o+r /var/log/auth.log 2>/dev/null || true
+
+      - name: 起中控 + Agent（TLS+TOFU，真实节点）
+        run: |
+          set -e
+          LIVE=/tmp/taoops-live
+          mkdir -p "$LIVE/bin" "$LIVE/srvdata" "$LIVE/conf"
+          sudo mkdir -p /var/log/taoops-sec && sudo chown "$(whoami)" /var/log/taoops-sec
+          cd /tmp/taoops-src
+          (cd agent && go build -o "$LIVE/bin/agent" ./cmd/agent && go build -o "$LIVE/bin/dispatch" ./cmd/dispatch)
+          dotnet build server -c Release
+          env -u ASPNETCORE_URLS TAOOPS_DATA_DIR="$LIVE/srvdata" TAOOPS_PORT=5243 \
+            dotnet server/bin/Release/net10.0/TaoOps.Server.dll > "$LIVE/server.log" 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sk "https://127.0.0.1:5243/" >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          TAOOPS_SERVER=127.0.0.1:5243 TAOOPS_AGENT_ID=live-node-1 \
+            TAOOPS_KNOWN_HOSTS="$LIVE/known_hosts" TAOOPS_CONF_DIR="$LIVE/conf" \
+            TAOOPS_BACKUP_DIR="$LIVE/backup" TAOOPS_SESSION_DIR="$LIVE/sessions" \
+            TAOOPS_LOG_DIR="$LIVE/logs" TAOOPS_PACKAGE_DIR="$LIVE/pkg" TAOOPS_INSTALL_DIR="$LIVE/opt" \
+            TAOOPS_AUDIT_PATH="$LIVE/audit.json" \
+            "$LIVE/bin/agent" > "$LIVE/agent.log" 2>&1 &
+          for i in $(seq 1 40); do
+            grep -q "registered" "$LIVE/agent.log" 2>/dev/null && break
+            sleep 0.5
+          done
+          tail -5 "$LIVE/agent.log"
+
+      - name: SSH 防爆破实弹断言（L6）+ 回流断言（L7）
+        run: |
+          set -u
+          LIVE=/tmp/taoops-live
+          EVENTS_LOG=/var/log/taoops-waf/events.log
+          SEC_LOG=/var/log/taoops-sec/events.log
+          echo "== L6 SSH bruteforce =="
+          for i in $(seq 1 6); do
+            sshpass -p "definitely-wrong-$i" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+              -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+              root@127.0.0.1 true >/dev/null 2>&1 || true
+          done
+          sleep 1
+          FAILED=$(sudo grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
+          echo "L6a auth.log Failed password lines: $FAILED"
+          SEC_OUT=$("$LIVE/bin/dispatch" "127.0.0.1:5243" "live-node-1" sec.manage op=scan 2>&1) || true
+          echo "L6b dispatch sec.manage: $SEC_OUT"
+          sleep 1
+          if [ -f "$SEC_LOG" ]; then
+            echo "L6c TAOOPS_SEC events: $(grep -c TAOOPS_SEC "$SEC_LOG" || true)"
+          else
+            echo "L6c SEC log missing: $SEC_LOG"
+          fi
+          echo "== L7 log-stream roundtrip =="
+          cd /tmp/taoops-src
+          dotnet build tools/wsprobe -c Release -o "$LIVE/wsprobedir" >/dev/null
+          WSPROBE_OUT=$(dotnet "$LIVE/wsprobedir/wsprobe.dll" logs \
+            "wss://127.0.0.1:5243/ws/agent/live-node-1/logs?path=$EVENTS_LOG&tail=5" TAOOPS_WAF 12 2>&1 || true)
+          curl -s -o /dev/null 'http://127.0.0.1:8080/?id=2%20union%20select%20livefire'
+          sleep 1
+          echo "$WSPROBE_OUT" | grep -q TAOOPS_WAF && echo "L7 roundtrip: DELIVERED" || { echo "L7 roundtrip: MISSING"; echo "$WSPROBE_OUT" | tail -5; }
+
+      - name: eBPF 环境探针（供 eBPF 班参考，不算断言）
+        run: |
+          echo "kernel: $(uname -r)"
+          echo "bpf fs: $(ls /sys/fs/bpf 2>/dev/null | head -3 || echo none)"
+          (bpftool version 2>/dev/null || sudo /usr/lib/linux-tools/*/bpftool version 2>/dev/null || echo "bpftool unavailable") | head -2
+          sudo ls /sys/kernel/security 2>/dev/null | head -3 || echo "securityfs not exposed"
+
+      - name: 上传实弹证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-fire-evidence
+          path: |
+            /tmp/taoops-live/*.log
+            /var/log/taoops-waf/events.log
+            /var/log/taoops-sec/events.log
+            /tmp/lfs-status.txt
+          if-no-files-found: ignore
