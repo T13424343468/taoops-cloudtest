@@ -146,6 +146,7 @@ jobs:
           [ "$CODE" = "200" ] || { echo "ASSERT-FAIL L1b"; exit 1; }
           curl -s http://127.0.0.1:8080/__wafprobe >/dev/null
           echo "== probe results =="; sudo grep PROBE "$EVENTS_LOG" | tail -4
+          echo "== debug: access.lua dump (first 1200) =="; sudo head -c 1200 "$WAFROOT/lua/access.lua"
           echo "== L2 whitelist =="
           CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
           echo "L2a whitelist SQLi: $CODE (want 200)"
