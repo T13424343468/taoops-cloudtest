@@ -112,7 +112,7 @@ jobs:
               server {
                   listen 8080;
                   include $LIVE/waf/site.conf;
-                  location / { return 200 "ok\n"; }
+                  location / { content_by_lua_block { ngx.say("ok") } }
               }
           }
           EOF
@@ -122,9 +122,11 @@ jobs:
           echo "== L1 baseline =="
           CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)
           echo "L1b baseline: $CODE"
+          [ "$CODE" = "200" ] || { echo "ASSERT-FAIL L1b"; exit 1; }
           echo "== L2 whitelist =="
           CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
           echo "L2a whitelist SQLi: $CODE (want 200)"
+          [ "$CODE" = "200" ] || { echo "ASSERT-FAIL L2a"; exit 1; }
           echo "== L3 hot reload =="
           START=$(date +%s)
           sudo cp /tmp/taoops-live/waf/rules-noip.json "$WAFROOT/lua/rules.json"
@@ -136,6 +138,7 @@ jobs:
           done
           ELAPSED=$(( $(date +%s) - START ))
           echo "L3a hot-reload deny: detected=$DETECTED elapsed=${ELAPSED}s"
+          { [ "$DETECTED" = "1" ] && [ "$ELAPSED" -le 6 ]; } || { echo "ASSERT-FAIL L3a"; exit 1; }
           echo "== L4 CC =="
           sudo cp /tmp/taoops-live/waf/rules-cc.json "$WAFROOT/lua/rules.json"
           sleep 6
@@ -145,8 +148,11 @@ jobs:
             CODES="$CODES $C"
           done
           echo "L4 CC burst codes:$CODES"
+          echo "$CODES" | grep -q 403 || { echo "ASSERT-FAIL L4"; exit 1; }
           echo "== L5 events log =="
-          sudo grep -c "TAOOPS_WAF" "$EVENTS_LOG" || true
+          WAF_EV=$(sudo grep -c "TAOOPS_WAF" "$EVENTS_LOG" || true)
+          echo "L5 events: $WAF_EV"
+          [ "$WAF_EV" -ge 1 ] || { echo "ASSERT-FAIL L5"; exit 1; }
 
       - name: 起 sshd + rsyslog，SSH 防爆破实弹准备
         run: |
@@ -184,6 +190,9 @@ jobs:
             sleep 0.5
           done
           tail -5 "$LIVE/agent.log"
+          NODE_ID=$(grep -oP 'registered as node \K[0-9a-f]{32}' "$LIVE/agent.log" | head -1)
+          echo "$NODE_ID" > "$LIVE/node_id"
+          echo "registered node_id: $NODE_ID"
 
       - name: SSH 防爆破实弹断言（L6）+ 回流断言（L7）
         run: |
@@ -200,22 +209,25 @@ jobs:
           sleep 1
           FAILED=$(sudo grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
           echo "L6a auth.log Failed password lines: $FAILED"
-          SEC_OUT=$("$LIVE/bin/dispatch" "127.0.0.1:5243" "live-node-1" sec.manage op=scan 2>&1) || true
+          [ "$FAILED" -ge 5 ] || { echo "ASSERT-FAIL L6a"; exit 1; }
+          NODE_ID=$(cat "$LIVE/node_id")
+          SEC_OUT=$("$LIVE/bin/dispatch" "127.0.0.1:5243" "$NODE_ID" sec.manage op=scan 2>&1) || true
           echo "L6b dispatch sec.manage: $SEC_OUT"
+          echo "$SEC_OUT" | grep -q "RESULT exit=0" || { echo "ASSERT-FAIL L6b"; exit 1; }
           sleep 1
           if [ -f "$SEC_LOG" ]; then
             echo "L6c TAOOPS_SEC events: $(grep -c TAOOPS_SEC "$SEC_LOG" || true)"
           else
-            echo "L6c SEC log missing: $SEC_LOG"
+            echo "ASSERT-FAIL L6c SEC log missing: $SEC_LOG"; exit 1
           fi
           echo "== L7 log-stream roundtrip =="
           cd /tmp/taoops-src
           dotnet build tools/wsprobe -c Release -o "$LIVE/wsprobedir" >/dev/null
           WSPROBE_OUT=$(dotnet "$LIVE/wsprobedir/wsprobe.dll" logs \
-            "wss://127.0.0.1:5243/ws/agent/live-node-1/logs?path=$EVENTS_LOG&tail=5" TAOOPS_WAF 12 2>&1 || true)
+            "wss://127.0.0.1:5243/ws/agent/$NODE_ID/logs?path=$EVENTS_LOG&tail=5" TAOOPS_WAF 12 2>&1 || true)
           curl -s -o /dev/null 'http://127.0.0.1:8080/?id=2%20union%20select%20livefire'
           sleep 1
-          echo "$WSPROBE_OUT" | grep -q TAOOPS_WAF && echo "L7 roundtrip: DELIVERED" || { echo "L7 roundtrip: MISSING"; echo "$WSPROBE_OUT" | tail -5; }
+          echo "$WSPROBE_OUT" | grep -q TAOOPS_WAF && echo "L7 roundtrip: DELIVERED" || { echo "ASSERT-FAIL L7"; echo "$WSPROBE_OUT" | tail -5; exit 1; }
 
       - name: eBPF 环境探针（供 eBPF 班参考，不算断言）
         run: |
