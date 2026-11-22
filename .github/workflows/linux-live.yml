@@ -69,21 +69,21 @@ jobs:
           dotnet build tools/wafgen -c Release
           mkdir -p /tmp/taoops-live/waf
           cat > /tmp/rules-whitelist.json <<'JSON'
-          {"rules":[
+          [
             {"id":"w1","name":"loopback allow","category":"IpWhitelist","action":"Allow","pattern":"127.0.0.1","windowSeconds":0,"maxRequests":0,"priority":60,"enabled":true},
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
-          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          ]
           JSON
           cat > /tmp/rules-noip.json <<'JSON'
-          {"rules":[
+          [
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
-          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          ]
           JSON
           cat > /tmp/rules-cc.json <<'JSON'
-          {"rules":[
+          [
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true},
             {"id":"c1","name":"cc 5/60s","category":"CcRate","action":"Deny","pattern":"","windowSeconds":60,"maxRequests":5,"priority":20,"enabled":true}
-          ],"settings":{"enabled":true,"denyStatusCode":403}}
+          ]
           JSON
           dotnet tools/wafgen/bin/Release/net10.0/wafgen.dll /tmp/rules-whitelist.json /tmp/taoops-live/waf
           cp /tmp/rules-whitelist.json /tmp/taoops-live/waf/rules-whitelist.json
