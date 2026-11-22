@@ -45,7 +45,8 @@ jobs:
 
       - name: 安装 OpenResty（官方 apt 源）
         run: |
-          dist=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          # runner 26.04 的 codename 无 openresty dist，固定用 noble（glibc 向后兼容）
+          dist=noble
           wget -qO /tmp/openresty.gpg https://openresty.org/package/pubkey.gpg
           sudo gpg --dearmor < /tmp/openresty.gpg | sudo tee /usr/share/keyrings/openresty.gpg >/dev/null
           echo "deb [signed-by=/usr/share/keyrings/openresty.gpg] https://openresty.org/package/ubuntu/dists/$dist/openresty main" | sudo tee /etc/apt/sources.list.d/openresty.list
