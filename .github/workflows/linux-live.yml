@@ -68,27 +68,32 @@ jobs:
           set -e
           dotnet build tools/wafgen -c Release
           mkdir -p /tmp/taoops-live/waf
-          cat > /tmp/rules-whitelist.json <<'JSON'
-          [
+          # 输入用 WafRuleSet 对象形态（wafgen 契约）；wafgen 输出的 rules.json 即生成器数组形态
+          cat > /tmp/in-whitelist.json <<'JSON'
+          {"rules":[
             {"id":"w1","name":"loopback allow","category":"IpWhitelist","action":"Allow","pattern":"127.0.0.1","windowSeconds":0,"maxRequests":0,"priority":60,"enabled":true},
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
-          ]
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
           JSON
-          cat > /tmp/rules-noip.json <<'JSON'
-          [
+          cat > /tmp/in-noip.json <<'JSON'
+          {"rules":[
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true}
-          ]
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
           JSON
-          cat > /tmp/rules-cc.json <<'JSON'
-          [
+          cat > /tmp/in-cc.json <<'JSON'
+          {"rules":[
             {"id":"s1","name":"sqli union select","category":"Sqli","action":"Deny","pattern":"union\\s+select","windowSeconds":0,"maxRequests":0,"priority":10,"enabled":true},
             {"id":"c1","name":"cc 5/60s","category":"CcRate","action":"Deny","pattern":"","windowSeconds":60,"maxRequests":5,"priority":20,"enabled":true}
-          ]
+          ],"settings":{"enabled":true,"denyStatusCode":403}}
           JSON
-          dotnet tools/wafgen/bin/Release/net10.0/wafgen.dll /tmp/rules-whitelist.json /tmp/taoops-live/waf
-          cp /tmp/rules-whitelist.json /tmp/taoops-live/waf/rules-whitelist.json
-          cp /tmp/rules-noip.json      /tmp/taoops-live/waf/rules-noip.json
-          cp /tmp/rules-cc.json        /tmp/taoops-live/waf/rules-cc.json
+          WAFGEN=tools/wafgen/bin/Release/net10.0/wafgen.dll
+          dotnet $WAFGEN /tmp/in-whitelist.json /tmp/taoops-live/waf
+          cp /tmp/taoops-live/waf/rules.json /tmp/taoops-live/waf/rules-whitelist.json
+          dotnet $WAFGEN /tmp/in-noip.json /tmp/wafgen-noip
+          cp /tmp/wafgen-noip/rules.json /tmp/taoops-live/waf/rules-noip.json
+          dotnet $WAFGEN /tmp/in-cc.json /tmp/wafgen-cc
+          cp /tmp/wafgen-cc/rules.json /tmp/taoops-live/waf/rules-cc.json
+          head -c 200 /tmp/taoops-live/waf/rules-whitelist.json; echo
           ls -la /tmp/taoops-live/waf/
 
       - name: 起 OpenResty 并跑 WAF 实弹断言（L1-L5）
