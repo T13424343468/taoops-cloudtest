@@ -162,7 +162,7 @@ jobs:
           DETECTED=0
           for i in $(seq 1 20); do
             sleep 0.5
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -A 'union select' 'http://127.0.0.1:8080/?id=1')
             if [ "$CODE" = "403" ]; then DETECTED=1; break; fi
           done
           ELAPSED=$(( $(date +%s) - START ))
