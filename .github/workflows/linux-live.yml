@@ -135,6 +135,11 @@ jobs:
           echo "== L3 hot reload =="
           START=$(date +%s)
           sudo cp /tmp/taoops-live/waf/rules-noip.json "$WAFROOT/lua/rules.json"
+          echo "== debug: live rules.json =="; sudo head -c 400 "$WAFROOT/lua/rules.json"; echo
+          echo "== debug: direct deny probe (UA path) =="
+          curl -s -o /dev/null -w 'probe1=%{http_code}\n' -A 'union select' 'http://127.0.0.1:8080/?id=1'
+          curl -s -o /dev/null -w 'probe2=%{http_code}\n' 'http://127.0.0.1:8080/?id=1%20union%20select'
+          echo "== debug: events.log tail =="; sudo tail -5 "$EVENTS_LOG"
           DETECTED=0
           for i in $(seq 1 20); do
             sleep 0.5
