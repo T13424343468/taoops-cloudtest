@@ -118,6 +118,22 @@ jobs:
                   listen 8080;
                   include $LIVE/waf/site.conf;
                   location / { content_by_lua_block { ngx.say("ok") } }
+                  location /__wafprobe {
+                      access_by_lua_block {
+                          ngx.log(ngx.ERR, "PROBE ran; rules_file=" .. tostring(TAOOPS_WAF_RULES_FILE) .. " enabled=" .. tostring(TAOOPS_WAF_ENABLED))
+                          local f = io.open(tostring(TAOOPS_WAF_RULES_FILE), "r")
+                          if f then
+                              local b = f:read("*a"); f:close()
+                              ngx.log(ngx.ERR, "PROBE file_len=" .. tostring(#b))
+                              local json = require("cjson.safe")
+                              local t = json.decode(b)
+                              ngx.log(ngx.ERR, "PROBE decoded_rules=" .. tostring(t and #t or "nil"))
+                          else
+                              ngx.log(ngx.ERR, "PROBE file_open_failed")
+                          end
+                      }
+                      content_by_lua_block { ngx.say("probe") }
+                  }
               }
           }
           EOF
@@ -128,6 +144,8 @@ jobs:
           CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)
           echo "L1b baseline: $CODE"
           [ "$CODE" = "200" ] || { echo "ASSERT-FAIL L1b"; exit 1; }
+          curl -s http://127.0.0.1:8080/__wafprobe >/dev/null
+          echo "== probe results =="; sudo grep PROBE "$EVENTS_LOG" | tail -4
           echo "== L2 whitelist =="
           CODE=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8080/?id=1%20union%20select')
           echo "L2a whitelist SQLi: $CODE (want 200)"
